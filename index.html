@@ -4,23 +4,58 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Excel Formula Helper</title>
+
+  <!-- AG-Grid 社区版：免费、商用无限制。从 CDN 引入，不需要构建工具 -->
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@33.0.3/dist/ag-grid-community.min.js"></script>
+
   <style>
     body {
       margin: 0;
-      height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      padding: 24px;
       font-family: -apple-system, system-ui, sans-serif;
       background: #f7f7f5;
       color: #222;
-      text-align: center;
-      padding: 20px;
     }
-    h1 { font-size: 24px; font-weight: 500; }
+    h1 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+    p.sub { color: #666; margin-top: 0; font-size: 14px; }
+    #myGrid { width: 100%; max-width: 700px; height: 240px; margin-top: 16px; }
   </style>
 </head>
 <body>
-  <h1>Excel Formula Helper — coming soon</h1>
+  <h1>Excel Formula Helper</h1>
+  <p class="sub">Paste your table, describe what you need, get a formula that drops right in.</p>
+
+  <!-- 表格会渲染在这个 div 里 -->
+  <div id="myGrid"></div>
+
+  <script>
+    // 先写死几行示例数据，确认表格能显示
+    const rowData = [
+      { OrderID: "A001", SKU: "X-100", SalePrice: 50, ShippingFee: 5 },
+      { OrderID: "A002", SKU: "X-200", SalePrice: 80, ShippingFee: 8 },
+      { OrderID: "A003", SKU: "X-100", SalePrice: 50, ShippingFee: 5 },
+    ];
+
+    // 定义列（表头）
+    const columnDefs = [
+      { field: "OrderID" },
+      { field: "SKU" },
+      { field: "SalePrice" },
+      { field: "ShippingFee" },
+    ];
+
+    // 网格配置
+    const gridOptions = {
+      rowData: rowData,
+      columnDefs: columnDefs,
+      defaultColDef: { flex: 1, minWidth: 100 },
+    };
+
+    // 页面加载完后，把表格创建到那个 div 里
+    document.addEventListener("DOMContentLoaded", function () {
+      const gridDiv = document.querySelector("#myGrid");
+      agGrid.createGrid(gridDiv, gridOptions);
+    });
+  </script>
 </body>
 </html>
