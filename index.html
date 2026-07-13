@@ -4,57 +4,136 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Excel Formula Helper</title>
-
-  <!-- AG-Grid 社区版：免费、商用无限制。从 CDN 引入，不需要构建工具 -->
   <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@33.0.3/dist/ag-grid-community.min.js"></script>
-
   <style>
-    body {
-      margin: 0;
-      padding: 24px;
-      font-family: -apple-system, system-ui, sans-serif;
-      background: #f7f7f5;
-      color: #222;
-    }
+    body { margin: 0; padding: 24px; font-family: -apple-system, system-ui, sans-serif; background: #f7f7f5; color: #222; }
     h1 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
     p.sub { color: #666; margin-top: 0; font-size: 14px; }
-    #myGrid { width: 100%; max-width: 700px; height: 240px; margin-top: 16px; }
+    .note { font-size: 13px; color: #2563eb; margin: 12px 0; }
+    .toolbar { margin: 10px 0; display: flex; gap: 8px; flex-wrap: wrap; max-width: 820px; }
+    .toolbar button { padding: 6px 12px; font-size: 13px; cursor: pointer; background: #fff; color: #333; border: 1px solid #ccc; border-radius: 6px; }
+    .toolbar button:hover { background: #f0f0f0; }
+    .toolbar button.danger { color: #c0392b; border-color: #e0b4b0; }
+    #myGrid { width: 100%; max-width: 820px; height: 320px; margin-top: 4px; }
+    #status { font-size: 12px; color: #999; margin-top: 8px; }
+    .rowNumCell { background: #f0f0f0; color: #888; text-align: center; font-size: 12px; }
+    .ag-header-cell-text { font-weight: 600; }
   </style>
 </head>
 <body>
   <h1>Excel Formula Helper</h1>
   <p class="sub">Paste your table, describe what you need, get a formula that drops right in.</p>
+  <p class="note">🔒 Just paste your headers and a sample row — we never see or store your real data.</p>
 
-  <!-- 表格会渲染在这个 div 里 -->
+  <div class="toolbar">
+    <button id="clearBtn" class="danger">Clear all</button>
+    <button id="addRowBtn">+ Row</button>
+    <button id="addColBtn">+ Column</button>
+    <button id="delRowBtn">Delete selected row</button>
+  </div>
+
   <div id="myGrid"></div>
+  <div id="status">Copy a few cells from Excel, then press ⌘V / Ctrl+V anywhere on this page. Click a row number to select it.</div>
 
   <script>
-    // 先写死几行示例数据，确认表格能显示
-    const rowData = [
-      { OrderID: "A001", SKU: "X-100", SalePrice: 50, ShippingFee: 5 },
-      { OrderID: "A002", SKU: "X-200", SalePrice: 80, ShippingFee: 8 },
-      { OrderID: "A003", SKU: "X-100", SalePrice: 50, ShippingFee: 5 },
-    ];
+    let gridApi = null;
+    let numCols = 0;
 
-    // 定义列（表头）
-    const columnDefs = [
-      { field: "OrderID" },
-      { field: "SKU" },
-      { field: "SalePrice" },
-      { field: "ShippingFee" },
-    ];
+    function toColLabel(n) {
+      let s = ""; n = n + 1;
+      while (n > 0) { let r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); }
+      return s;
+    }
 
-    // 网格配置
     const gridOptions = {
-      rowData: rowData,
-      columnDefs: columnDefs,
-      defaultColDef: { flex: 1, minWidth: 100 },
+      rowData: [],
+      columnDefs: [],
+      defaultColDef: { minWidth: 90, editable: true, resizable: true, sortable: false },
+      rowSelection: "single",
+      overlayNoRowsTemplate: "Press ⌘V / Ctrl+V to paste your table here",
     };
 
-    // 页面加载完后，把表格创建到那个 div 里
     document.addEventListener("DOMContentLoaded", function () {
-      const gridDiv = document.querySelector("#myGrid");
-      agGrid.createGrid(gridDiv, gridOptions);
+      gridApi = agGrid.createGrid(document.querySelector("#myGrid"), gridOptions);
+    });
+
+    function buildColumnDefs(cols) {
+      const defs = [{
+        headerName: "", field: "__rownum__",
+        width: 48, minWidth: 48, maxWidth: 48,
+        editable: false, sortable: false, resizable: false,
+        cellClass: "rowNumCell", pinned: "left",
+      }];
+      for (let c = 0; c < cols; c++) defs.push({ headerName: toColLabel(c), field: "c" + c });
+      return defs;
+    }
+
+    function getRows() { const rows = []; gridApi.forEachNode(n => rows.push(n.data)); return rows; }
+
+    function renumber(rows) {
+      rows.forEach((r, i) => r.__rownum__ = i + 1);
+      gridApi.setGridOption("rowData", rows);
+      document.getElementById("status").textContent = "Now " + numCols + " columns × " + rows.length + " rows.";
+    }
+
+    function loadFromText(raw) {
+      const text = raw.replace(/\r/g, "").replace(/\s+$/,"");
+      if (!text.trim()) return;
+      const lines = text.split("\n").filter(l => l.trim() !== "");
+      function splitRow(line) {
+        if (line.includes("\t")) return line.split("\t");
+        if (line.includes(",")) return line.split(",");
+        return line.split(/\s{2,}/);
+      }
+      const rows = lines.map(splitRow);
+      numCols = Math.max(...rows.map(r => r.length));
+      const rowData = rows.map((cells, rIdx) => {
+        const obj = { __rownum__: rIdx + 1 };
+        for (let c = 0; c < numCols; c++) obj["c" + c] = (cells[c] || "").trim();
+        return obj;
+      });
+      gridApi.setGridOption("columnDefs", buildColumnDefs(numCols));
+      gridApi.setGridOption("rowData", rowData);
+      document.getElementById("status").textContent = "Loaded " + numCols + " columns × " + rows.length + " rows. Double-click a cell to edit. Click a row number to select.";
+    }
+
+    document.addEventListener("paste", function (e) {
+      const tag = (e.target.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+      const text = (e.clipboardData || window.clipboardData).getData("text");
+      if (text) { loadFromText(text); e.preventDefault(); }
+    });
+
+    document.getElementById("clearBtn").addEventListener("click", function () {
+      numCols = 0;
+      gridApi.setGridOption("columnDefs", []);
+      gridApi.setGridOption("rowData", []);
+      document.getElementById("status").textContent = "Cleared. Press ⌘V / Ctrl+V to paste a new table.";
+    });
+
+    document.getElementById("addRowBtn").addEventListener("click", function () {
+      if (numCols === 0) { numCols = 3; gridApi.setGridOption("columnDefs", buildColumnDefs(numCols)); }
+      const rows = getRows();
+      const obj = { __rownum__: rows.length + 1 };
+      for (let c = 0; c < numCols; c++) obj["c" + c] = "";
+      rows.push(obj);
+      renumber(rows);
+    });
+
+    document.getElementById("addColBtn").addEventListener("click", function () {
+      numCols += 1;
+      const rows = getRows();
+      rows.forEach(r => { if (r["c" + (numCols - 1)] === undefined) r["c" + (numCols - 1)] = ""; });
+      gridApi.setGridOption("columnDefs", buildColumnDefs(numCols));
+      gridApi.setGridOption("rowData", rows);
+    });
+
+    document.getElementById("delRowBtn").addEventListener("click", function () {
+      const selected = gridApi.getSelectedNodes();
+      if (selected.length === 0) { alert("Click a row (on its number) to select it first."); return; }
+      const del = selected.map(n => n.data);
+      const rows = getRows().filter(r => !del.includes(r));
+      renumber(rows);
     });
   </script>
 </body>
