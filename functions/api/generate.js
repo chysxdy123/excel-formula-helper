@@ -83,6 +83,32 @@ function validateModelResult(result) {
   return null;
 }
 
+function createDiagnosticId() {
+  return crypto.randomUUID().split("-")[0].toUpperCase();
+}
+
+async function throwProviderError(response) {
+  let errorType = "unknown";
+  let providerCode = "unknown";
+  try {
+    const body = await response.json();
+    errorType = String(body?.error?.metadata?.error_type || "unknown").slice(0, 100);
+    providerCode = String(body?.error?.metadata?.provider_code || body?.error?.code || "unknown").slice(0, 100);
+  } catch {
+    // The upstream body may not be JSON; status and diagnostic ID are still enough to trace it.
+  }
+  const diagnosticId = createDiagnosticId();
+  console.error("OpenRouter request failed", {
+    diagnosticId,
+    status: response.status,
+    errorType,
+    providerCode,
+  });
+  if (response.status === 402) throw new Error("The AI spending limit has been reached for today.");
+  if (response.status === 429) throw new Error("Too many requests. Please wait a minute and try again.");
+  throw new Error(`The AI provider rejected the request. Diagnostic ID: ${diagnosticId}`);
+}
+
 async function checkDailySpend(apiKey) {
   const response = await fetch(OPENROUTER_KEY_INFO_ENDPOINT, {
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -118,14 +144,10 @@ async function requestFormula(apiKey, payload) {
         data_collection: "deny",
         zdr: true,
       },
-      max_tokens: 1000,
+      max_completion_tokens: 1000,
     }),
   });
-  if (!response.ok) {
-    if (response.status === 402) throw new Error("The AI spending limit has been reached for today.");
-    if (response.status === 429) throw new Error("Too many requests. Please wait a minute and try again.");
-    throw new Error("The AI provider is temporarily unavailable. Please try again.");
-  }
+  if (!response.ok) await throwProviderError(response);
   const body = await response.json();
   const content = body?.choices?.[0]?.message?.content;
   if (typeof content !== "string") return null;
