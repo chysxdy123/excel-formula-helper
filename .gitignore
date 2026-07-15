@@ -1,0 +1,8 @@
+.DS_Store
+.dev.vars*
+.env*
+.wrangler/
+.playwright-cli/
+node_modules/
+*.docx
+~$*

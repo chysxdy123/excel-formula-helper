@@ -18,6 +18,24 @@
     #status { font-size: 12px; color: #999; margin-top: 8px; }
     .rowNumCell { background: #f0f0f0; color: #888; text-align: center; font-size: 12px; }
     .ag-header-cell-text { font-weight: 600; }
+    .selectedColumnHeader, .selectedColumnCell { background: #dbeafe; }
+    .selectedRangeCell { background: #dbeafe; }
+    .selectedTargetCell { box-shadow: inset 0 0 0 3px #2563eb; }
+    .formulaTargetCell { background: #fef08a !important; }
+    .referencedCell { outline: 2px solid #a78bfa; outline-offset: -2px; background: #f5f3ff; }
+    .formula-request { display: flex; gap: 8px; max-width: 820px; margin-top: 18px; }
+    .formula-request input { flex: 1; min-width: 0; padding: 9px 11px; font-size: 13px; border: 1px solid #ccc; border-radius: 6px; }
+    .formula-request button, .result-card button { padding: 8px 12px; font-size: 13px; cursor: pointer; background: #fff; color: #333; border: 1px solid #ccc; border-radius: 6px; }
+    .result-card { max-width: 794px; margin-top: 12px; padding: 12px; background: #fff; border: 1px solid #ddd; border-radius: 8px; }
+    .result-card p { margin: 0 0 10px; font-size: 13px; }
+    .result-card p:last-child { margin-bottom: 0; color: #666; }
+    .result-card ol { margin: 0 0 10px; padding-left: 22px; font-size: 13px; }
+    .result-card li { margin-bottom: 6px; }
+    .formula-line { display: flex; align-items: center; gap: 8px; }
+    .formula-line code { flex: 1; padding: 8px; overflow-x: auto; background: #f5f5f5; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .result-card.unsure { border-color: #f59e0b; background: #fffbeb; }
+    .result-card.error { border-color: #ef4444; background: #fef2f2; }
+    #generateBtn:disabled { cursor: wait; opacity: 0.65; }
   </style>
 </head>
 <body>
@@ -30,14 +48,48 @@
     <button id="addRowBtn">+ Row</button>
     <button id="addColBtn">+ Column</button>
     <button id="delRowBtn">Delete selected row</button>
+    <button id="delColBtn">Delete selected column</button>
   </div>
 
   <div id="myGrid"></div>
-  <div id="status">Copy a few cells from Excel, then press ⌘V / Ctrl+V anywhere on this page. Click a row number to select it.</div>
+  <div id="status">0 columns × 0 rows. Paste a table, then select cells as you would in Excel.</div>
+
+  <div class="formula-request">
+    <input id="formulaDescription" type="text" placeholder='Describe what you need — e.g. "look up the cost for each SKU from the other sheet and calculate profit"'>
+    <button id="generateBtn" type="button">Generate formula</button>
+  </div>
+
+  <div id="resultCard" class="result-card" hidden>
+    <div id="formulaResult">
+      <p>Put this formula in cell <strong id="targetCell"></strong>:</p>
+      <div class="formula-line">
+        <code id="formulaText"></code>
+        <button id="copyBtn" type="button">Copy</button>
+      </div>
+      <p id="placementNotice" hidden></p>
+      <p><strong>Explanation:</strong> <span id="formulaExplanation"></span></p>
+      <p><strong>Steps:</strong></p>
+      <ol>
+        <li>Click cell <strong id="stepTargetCell"></strong>, paste the formula (⌘V).</li>
+        <li>To apply it to the whole column: click the cell, then drag the small square at its bottom-right corner down to your last row. (Or copy the cell and paste into the range below.)</li>
+      </ol>
+    </div>
+    <p id="resultMessage" hidden></p>
+  </div>
 
   <script>
+    const ACCESS_TOKEN_KEY = "excelFormulaHelperAccessToken";
     let gridApi = null;
     let numCols = 0;
+    let selectedCol = null;
+    let selectedTarget = null;
+    let formulaTarget = null;
+    let referencedCells = new Set();
+    let generatedFormula = "";
+    let rangeStart = null;
+    let isRangeDragging = false;
+    let rangeWasDragged = false;
+    let tableVersion = 0;
 
     function toColLabel(n) {
       let s = ""; n = n + 1;
@@ -49,12 +101,80 @@
       rowData: [],
       columnDefs: [],
       defaultColDef: { minWidth: 90, editable: true, resizable: true, sortable: false },
-      rowSelection: "single",
+      rowSelection: {
+        mode: "singleRow",
+        checkboxes: false,
+        headerCheckbox: false,
+        enableClickSelection: false,
+      },
+      onCellValueChanged: function () { tableVersion += 1; },
+      onColumnHeaderClicked: function (event) {
+        const field = event.column.getColDef().field;
+        if (!field || field === "__rownum__") return;
+        gridApi.deselectAll();
+        clearRangeHighlight();
+        clearSelectedTarget();
+        selectedCol = Number(field.slice(1));
+        clearColumnHighlight();
+        document.querySelectorAll('[col-id="' + field + '"]').forEach(el => {
+          el.classList.add(el.classList.contains("ag-header-cell") ? "selectedColumnHeader" : "selectedColumnCell");
+        });
+      },
+      onCellClicked: function (event) {
+        selectedCol = null;
+        clearColumnHighlight();
+        if (event.colDef.field === "__rownum__") {
+          clearRangeHighlight();
+          clearSelectedTarget();
+          event.node.setSelected(true, true);
+        } else {
+          gridApi.deselectAll();
+          if (!rangeWasDragged) {
+            const col = Number(event.colDef.field.slice(1));
+            selectRange(event.rowIndex, col);
+            setSelectedTarget(event.rowIndex, col);
+          }
+        }
+        rangeWasDragged = false;
+      },
       overlayNoRowsTemplate: "Press ⌘V / Ctrl+V to paste your table here",
     };
 
     document.addEventListener("DOMContentLoaded", function () {
-      gridApi = agGrid.createGrid(document.querySelector("#myGrid"), gridOptions);
+      const grid = document.querySelector("#myGrid");
+      gridApi = agGrid.createGrid(grid, gridOptions);
+      grid.addEventListener("pointerdown", function (event) {
+        const cell = event.target.closest(".ag-center-cols-container .ag-cell");
+        if (!cell) return;
+        selectedCol = null;
+        clearColumnHighlight();
+        gridApi.deselectAll();
+        const row = Number(cell.closest(".ag-row").getAttribute("row-index"));
+        const col = Number(cell.getAttribute("col-id").slice(1));
+        if (event.shiftKey && rangeStart) {
+          rangeWasDragged = true;
+          clearSelectedTarget();
+          selectRange(row, col);
+          return;
+        }
+        rangeStart = { row: row, col: col };
+        isRangeDragging = true;
+        rangeWasDragged = false;
+        selectRange(row, col);
+      });
+      document.addEventListener("pointermove", function (event) {
+        if (!isRangeDragging) return;
+        const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest(".ag-center-cols-container .ag-cell");
+        if (!cell) return;
+        const row = Number(cell.closest(".ag-row").getAttribute("row-index"));
+        const col = Number(cell.getAttribute("col-id").slice(1));
+        const movedToAnotherCell = row !== rangeStart.row || col !== rangeStart.col;
+        if (!rangeWasDragged && movedToAnotherCell) clearSelectedTarget();
+        rangeWasDragged = rangeWasDragged || movedToAnotherCell;
+        selectRange(row, col);
+      });
+      document.addEventListener("pointerup", function () { isRangeDragging = false; });
+      document.addEventListener("pointercancel", function () { isRangeDragging = false; });
     });
 
     function buildColumnDefs(cols) {
@@ -64,29 +184,230 @@
         editable: false, sortable: false, resizable: false,
         cellClass: "rowNumCell", pinned: "left",
       }];
-      for (let c = 0; c < cols; c++) defs.push({ headerName: toColLabel(c), field: "c" + c });
+      for (let c = 0; c < cols; c++) defs.push({
+        headerName: toColLabel(c),
+        field: "c" + c,
+        cellClass: params => {
+          const classes = [];
+          if (referencedCells.has(params.node.rowIndex + ":" + c)) classes.push("referencedCell");
+          if (selectedTarget && selectedTarget.row === params.node.rowIndex && selectedTarget.col === c) classes.push("selectedTargetCell");
+          if (formulaTarget && formulaTarget.row === params.node.rowIndex && formulaTarget.col === c) classes.push("formulaTargetCell");
+          return classes;
+        },
+      });
       return defs;
     }
 
     function getRows() { const rows = []; gridApi.forEachNode(n => rows.push(n.data)); return rows; }
 
-    function renumber(rows) {
+    function clearColumnHighlight() {
+      document.querySelectorAll(".selectedColumnHeader, .selectedColumnCell").forEach(el => {
+        el.classList.remove("selectedColumnHeader", "selectedColumnCell");
+      });
+    }
+
+    function clearRangeHighlight() {
+      rangeStart = null;
+      document.querySelectorAll(".selectedRangeCell").forEach(el => el.classList.remove("selectedRangeCell"));
+    }
+
+    function clearSelectedTarget() {
+      selectedTarget = null;
+      if (gridApi) gridApi.refreshCells({ force: true });
+    }
+
+    function setSelectedTarget(row, col) {
+      selectedTarget = { row: row, col: col };
+      gridApi.refreshCells({ force: true });
+      document.getElementById("status").textContent = "Target cell: " + toColLabel(col) + (row + 1) + " — the formula will go here.";
+    }
+
+    function moveCellAfterDeletedRows(cell, deletedRows) {
+      if (!cell) return null;
+      if (deletedRows.includes(cell.row)) return null;
+      const rowsBefore = deletedRows.filter(row => row < cell.row).length;
+      return { row: cell.row - rowsBefore, col: cell.col };
+    }
+
+    function moveCellAfterDeletedColumn(cell, deletedCol) {
+      if (!cell) return null;
+      if (cell.col === deletedCol) return null;
+      return { row: cell.row, col: cell.col > deletedCol ? cell.col - 1 : cell.col };
+    }
+
+    function updateResultTarget() {
+      if (!formulaTarget) return;
+      const target = toColLabel(formulaTarget.col) + (formulaTarget.row + 1);
+      document.getElementById("targetCell").textContent = target;
+      document.getElementById("stepTargetCell").textContent = target;
+    }
+
+    function clearFormulaResult() {
+      formulaTarget = null;
+      generatedFormula = "";
+      referencedCells.clear();
+      document.getElementById("resultCard").hidden = true;
+      document.getElementById("placementNotice").hidden = true;
+      document.getElementById("copyBtn").textContent = "Copy";
+      if (gridApi) gridApi.refreshCells({ force: true });
+    }
+
+    function inferColumnType(rows, col) {
+      const values = rows.slice(1).map(row => String(row["c" + col] || "").trim()).filter(Boolean);
+      if (values.length === 0) return "text";
+      if (values.every(value => /^[-+]?[$£€¥]?\s*\d+(?:[,.]\d+)*(?:%|\s*)$/.test(value))) return "number";
+      if (values.every(value => /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(value) || /^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$/.test(value))) return "date";
+      return "text";
+    }
+
+    function buildStructurePayload(rows, targetCell, description) {
+      return {
+        columns: Array.from({ length: numCols }, (_, col) => ({
+          col: toColLabel(col),
+          header: String(rows[0]["c" + col] || "").trim(),
+          type: inferColumnType(rows, col),
+        })),
+        rowCount: rows.length,
+        targetCell: targetCell,
+        description: description,
+      };
+    }
+
+    function getAccessToken() {
+      let token = localStorage.getItem(ACCESS_TOKEN_KEY) || "";
+      if (!token) {
+        token = window.prompt("Enter the private beta access token:") || "";
+        if (token) localStorage.setItem(ACCESS_TOKEN_KEY, token);
+      }
+      return token;
+    }
+
+    function parseLocalReference(reference, rowCount) {
+      if (typeof reference !== "string" || reference.includes("!")) return [];
+      const normalized = reference.replace(/\$/g, "").trim().toUpperCase();
+      const match = normalized.match(/^([A-Z]+)(\d+)?(?::([A-Z]+)(\d+)?)?$/);
+      if (!match) return [];
+      const colToIndex = label => {
+        let value = 0;
+        for (const char of label) value = value * 26 + char.charCodeAt(0) - 64;
+        return value - 1;
+      };
+      const startCol = colToIndex(match[1]);
+      const endCol = colToIndex(match[3] || match[1]);
+      if (startCol < 0 || endCol >= numCols || endCol < startCol) return [];
+      const startRow = match[2] ? Number(match[2]) - 1 : 0;
+      const endRow = match[4] ? Number(match[4]) - 1 : (match[2] ? startRow : rowCount - 1);
+      if (startRow < 0 || endRow >= rowCount || endRow < startRow) return [];
+      const cells = [];
+      for (let row = startRow; row <= endRow; row++) {
+        for (let col = startCol; col <= endCol; col++) cells.push(row + ":" + col);
+      }
+      return cells;
+    }
+
+    function highlightReferencedRanges(ranges, rowCount) {
+      referencedCells.clear();
+      (ranges || []).forEach(range => parseLocalReference(range, rowCount).forEach(cell => referencedCells.add(cell)));
+    }
+
+    function showMessage(kind, message) {
+      const card = document.getElementById("resultCard");
+      card.classList.remove("unsure", "error");
+      card.classList.add(kind);
+      document.getElementById("formulaResult").hidden = true;
+      const resultMessage = document.getElementById("resultMessage");
+      resultMessage.textContent = message;
+      resultMessage.hidden = false;
+      card.hidden = false;
+    }
+
+    function showFormulaResult(result, target, usedFallback, rows, targetPosition) {
+      if (usedFallback) {
+        while (rows.length <= targetPosition.row) {
+          const row = { __rownum__: rows.length + 1 };
+          for (let col = 0; col < numCols; col++) row["c" + col] = "";
+          rows.push(row);
+        }
+        const outputCol = numCols;
+        numCols += 1;
+        rows.forEach(row => row["c" + outputCol] = "");
+        targetPosition = { row: targetPosition.row, col: outputCol };
+      }
+      selectedTarget = { row: targetPosition.row, col: targetPosition.col };
+      generatedFormula = result.formula;
+      rows[selectedTarget.row]["c" + selectedTarget.col] = generatedFormula;
+      formulaTarget = { row: selectedTarget.row, col: selectedTarget.col };
+      highlightReferencedRanges(result.referencedRanges, rows.length);
+      gridApi.setGridOption("columnDefs", buildColumnDefs(numCols));
+      gridApi.setGridOption("rowData", rows);
+      gridApi.ensureColumnVisible("c" + selectedTarget.col, "end");
+      gridApi.ensureIndexVisible(selectedTarget.row, "middle");
+
+      const card = document.getElementById("resultCard");
+      card.classList.remove("unsure", "error");
+      document.getElementById("formulaResult").hidden = false;
+      document.getElementById("resultMessage").hidden = true;
+      document.getElementById("targetCell").textContent = target;
+      document.getElementById("stepTargetCell").textContent = target;
+      document.getElementById("formulaText").textContent = generatedFormula;
+      document.getElementById("formulaExplanation").textContent = result.explanation;
+      document.getElementById("placementNotice").hidden = !usedFallback;
+      document.getElementById("placementNotice").textContent = usedFallback ? "We put it in " + target + " — click a different cell first if you want it elsewhere." : "";
+      document.getElementById("copyBtn").textContent = "Copy";
+      card.hidden = false;
+      document.getElementById("status").textContent = usedFallback
+        ? "We put it in " + target + " — click a different cell first if you want it elsewhere."
+        : "Formula placed in " + target + ".";
+    }
+
+    function selectRange(endRow, endCol) {
+      if (!rangeStart) rangeStart = { row: endRow, col: endCol };
+      const top = Math.min(rangeStart.row, endRow);
+      const bottom = Math.max(rangeStart.row, endRow);
+      const left = Math.min(rangeStart.col, endCol);
+      const right = Math.max(rangeStart.col, endCol);
+      document.querySelectorAll(".selectedRangeCell").forEach(el => el.classList.remove("selectedRangeCell"));
+      document.querySelectorAll(".ag-center-cols-container .ag-cell").forEach(cell => {
+        const row = Number(cell.closest(".ag-row").getAttribute("row-index"));
+        const col = Number(cell.getAttribute("col-id").slice(1));
+        if (row >= top && row <= bottom && col >= left && col <= right) cell.classList.add("selectedRangeCell");
+      });
+      const start = toColLabel(left) + (top + 1);
+      const end = toColLabel(right) + (bottom + 1);
+      updateStatus("Selected " + start + (start === end ? "" : ":" + end) + ".", gridApi.getDisplayedRowCount());
+    }
+
+    function updateStatus(action, rows) {
+      document.getElementById("status").textContent = action + " " + numCols + " columns × " + rows + " rows.";
+    }
+
+    function renumber(rows, action) {
       rows.forEach((r, i) => r.__rownum__ = i + 1);
       gridApi.setGridOption("rowData", rows);
-      document.getElementById("status").textContent = "Now " + numCols + " columns × " + rows.length + " rows.";
+      updateStatus(action, rows.length);
     }
 
     function loadFromText(raw) {
-      const text = raw.replace(/\r/g, "").replace(/\s+$/,"");
+      const text = raw.replace(/\r/g, "").replace(/\n+$/, "");
       if (!text.trim()) return;
       const lines = text.split("\n").filter(l => l.trim() !== "");
+      const delimiter = text.includes("\t") ? "tab" : text.includes(",") ? "comma" : "spaces";
       function splitRow(line) {
-        if (line.includes("\t")) return line.split("\t");
-        if (line.includes(",")) return line.split(",");
+        if (delimiter === "tab") return line.split("\t");
+        if (delimiter === "comma") return line.split(",");
         return line.split(/\s{2,}/);
       }
       const rows = lines.map(splitRow);
+      tableVersion += 1;
       numCols = Math.max(...rows.map(r => r.length));
+      selectedCol = null;
+      selectedTarget = null;
+      formulaTarget = null;
+      referencedCells.clear();
+      generatedFormula = "";
+      clearColumnHighlight();
+      clearRangeHighlight();
+      document.getElementById("resultCard").hidden = true;
       const rowData = rows.map((cells, rIdx) => {
         const obj = { __rownum__: rIdx + 1 };
         for (let c = 0; c < numCols; c++) obj["c" + c] = (cells[c] || "").trim();
@@ -94,10 +415,12 @@
       });
       gridApi.setGridOption("columnDefs", buildColumnDefs(numCols));
       gridApi.setGridOption("rowData", rowData);
-      document.getElementById("status").textContent = "Loaded " + numCols + " columns × " + rows.length + " rows. Double-click a cell to edit. Click a row number to select.";
+      updateStatus("Loaded", rows.length);
+      document.getElementById("status").textContent += " Drag across cells to select a range; Shift-click extends the current selection.";
     }
 
     document.addEventListener("paste", function (e) {
+      if (!gridApi || gridApi.getEditingCells().length > 0) return;
       const tag = (e.target.tagName || "").toLowerCase();
       if (tag === "input" || tag === "textarea") return;
       const text = (e.clipboardData || window.clipboardData).getData("text");
@@ -105,35 +428,158 @@
     });
 
     document.getElementById("clearBtn").addEventListener("click", function () {
+      tableVersion += 1;
       numCols = 0;
+      selectedCol = null;
+      selectedTarget = null;
+      formulaTarget = null;
+      referencedCells.clear();
+      generatedFormula = "";
+      clearColumnHighlight();
+      clearRangeHighlight();
+      document.getElementById("resultCard").hidden = true;
       gridApi.setGridOption("columnDefs", []);
       gridApi.setGridOption("rowData", []);
-      document.getElementById("status").textContent = "Cleared. Press ⌘V / Ctrl+V to paste a new table.";
+      updateStatus("Cleared.", 0);
+      document.getElementById("status").textContent += " Press ⌘V / Ctrl+V to paste a new table.";
     });
 
     document.getElementById("addRowBtn").addEventListener("click", function () {
+      tableVersion += 1;
+      clearRangeHighlight();
       if (numCols === 0) { numCols = 3; gridApi.setGridOption("columnDefs", buildColumnDefs(numCols)); }
       const rows = getRows();
       const obj = { __rownum__: rows.length + 1 };
       for (let c = 0; c < numCols; c++) obj["c" + c] = "";
       rows.push(obj);
-      renumber(rows);
+      renumber(rows, "Added a row.");
     });
 
     document.getElementById("addColBtn").addEventListener("click", function () {
+      tableVersion += 1;
+      clearRangeHighlight();
       numCols += 1;
       const rows = getRows();
       rows.forEach(r => { if (r["c" + (numCols - 1)] === undefined) r["c" + (numCols - 1)] = ""; });
       gridApi.setGridOption("columnDefs", buildColumnDefs(numCols));
       gridApi.setGridOption("rowData", rows);
+      updateStatus("Added column " + toColLabel(numCols - 1) + ".", rows.length);
     });
 
     document.getElementById("delRowBtn").addEventListener("click", function () {
       const selected = gridApi.getSelectedNodes();
-      if (selected.length === 0) { alert("Click a row (on its number) to select it first."); return; }
+      if (selected.length === 0) { alert("Click a row to select it first."); return; }
+      tableVersion += 1;
+      const deletedRows = selected.map(n => n.rowIndex).sort((a, b) => a - b);
       const del = selected.map(n => n.data);
       const rows = getRows().filter(r => !del.includes(r));
-      renumber(rows);
+      selectedTarget = moveCellAfterDeletedRows(selectedTarget, deletedRows);
+      const previousFormulaTarget = formulaTarget;
+      formulaTarget = moveCellAfterDeletedRows(formulaTarget, deletedRows);
+      if (previousFormulaTarget && !formulaTarget) clearFormulaResult();
+      else if (formulaTarget) updateResultTarget();
+      clearRangeHighlight();
+      renumber(rows, "Deleted the selected row.");
+    });
+
+    document.getElementById("delColBtn").addEventListener("click", function () {
+      if (selectedCol === null) { alert("Click a column header to select it first."); return; }
+      tableVersion += 1;
+      const deletedLabel = toColLabel(selectedCol);
+      const deletedCol = selectedCol;
+      const rows = getRows();
+      rows.forEach(row => {
+        for (let c = selectedCol; c < numCols - 1; c++) row["c" + c] = row["c" + (c + 1)];
+        delete row["c" + (numCols - 1)];
+      });
+      numCols -= 1;
+      selectedTarget = moveCellAfterDeletedColumn(selectedTarget, deletedCol);
+      const previousFormulaTarget = formulaTarget;
+      formulaTarget = moveCellAfterDeletedColumn(formulaTarget, deletedCol);
+      referencedCells.clear();
+      if (previousFormulaTarget && !formulaTarget) clearFormulaResult();
+      else if (formulaTarget) updateResultTarget();
+      selectedCol = null;
+      clearColumnHighlight();
+      clearRangeHighlight();
+      gridApi.setGridOption("columnDefs", buildColumnDefs(numCols));
+      gridApi.setGridOption("rowData", rows);
+      updateStatus("Deleted column " + deletedLabel + ".", rows.length);
+    });
+
+    document.getElementById("generateBtn").addEventListener("click", async function () {
+      const rows = getRows();
+      if (numCols === 0 || rows.length === 0) { alert("Paste a table first"); return; }
+      const description = document.getElementById("formulaDescription").value.trim();
+      if (!description) { showMessage("unsure", "Describe what you need, then try again."); return; }
+      const accessToken = getAccessToken();
+      if (!accessToken) { showMessage("error", "An access token is required during private beta."); return; }
+
+      clearColumnHighlight();
+      clearRangeHighlight();
+      gridApi.deselectAll();
+      selectedCol = null;
+      referencedCells.clear();
+
+      let usedFallback = false;
+      const targetPosition = selectedTarget || { row: 1, col: numCols };
+      if (!selectedTarget) usedFallback = true;
+      const target = toColLabel(targetPosition.col) + (targetPosition.row + 1);
+      const payload = buildStructurePayload(rows, target, description);
+      const requestTableVersion = tableVersion;
+      const button = this;
+      button.disabled = true;
+      button.textContent = "Generating...";
+      document.getElementById("status").textContent = "Generating a formula from your table structure...";
+      try {
+        const response = await fetch("/api/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Access-Token": accessToken },
+          body: JSON.stringify(payload),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (response.status === 403) {
+          localStorage.removeItem(ACCESS_TOKEN_KEY);
+          throw new Error("Access token rejected. Enter it again on your next attempt.");
+        }
+        if (!response.ok) throw new Error(result.error || "The AI service is temporarily unavailable. Please try again.");
+        if (tableVersion !== requestTableVersion) throw new Error("The table changed while the formula was being generated. Please try again.");
+        if ((!usedFallback && (!selectedTarget || selectedTarget.row !== targetPosition.row || selectedTarget.col !== targetPosition.col)) || (usedFallback && selectedTarget)) {
+          throw new Error("The target cell changed while the formula was being generated. Please try again.");
+        }
+        if (result.status === "unsure") {
+          formulaTarget = null;
+          generatedFormula = "";
+          gridApi.refreshCells({ force: true });
+          showMessage("unsure", "I need one clarification: " + result.question);
+          document.getElementById("status").textContent = "More detail is needed before a safe formula can be generated.";
+          return;
+        }
+        showFormulaResult(result, target, usedFallback, rows, targetPosition);
+      } catch (error) {
+        formulaTarget = null;
+        generatedFormula = "";
+        gridApi.refreshCells({ force: true });
+        showMessage("error", error.message || "The AI service is temporarily unavailable. Please try again.");
+        document.getElementById("status").textContent = "Formula generation failed. Your table data stayed in this browser.";
+      } finally {
+        button.disabled = false;
+        button.textContent = "Generate formula";
+      }
+    });
+
+    document.getElementById("copyBtn").addEventListener("click", async function () {
+      try {
+        await navigator.clipboard.writeText(generatedFormula);
+      } catch (error) {
+        const input = document.createElement("textarea");
+        input.value = generatedFormula;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand("copy");
+        input.remove();
+      }
+      this.textContent = "Copied!";
     });
   </script>
 </body>
