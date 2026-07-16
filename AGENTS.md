@@ -1,5 +1,7 @@
 # Excel Formula Helper 项目规则
 
+> **开工前先读 `变更记录.md`** —— 里面记录了你不在场时（由 Claude 直接改的）近期改动、当前部署状态、已知待优化项，以及唯一权威副本就在本目录（`Codex Workspace/WEB/excel-formula-helper`），别去 `桌面/GitHub` 那个旧副本。
+
 ## 产品定位
 
 - 面向不懂 Excel 公式的用户，根据表结构和描述生成可复制的公式，并说明应放入哪个单元格。
