@@ -1,7 +1,7 @@
 const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_KEY_INFO_ENDPOINT = "https://openrouter.ai/api/v1/key";
 const MODEL = "openai/gpt-5-nano";
-const DAILY_SPEND_LIMIT_USD = 0.1;
+const DAILY_SPEND_LIMIT_USD = 2;
 const MAX_COLUMNS = 200;
 const MAX_ROWS = 1000000;
 const MAX_DESCRIPTION_LENGTH = 2000;
@@ -144,18 +144,30 @@ async function requestFormula(apiKey, payload) {
         data_collection: "deny",
         zdr: true,
       },
-      max_completion_tokens: 1000,
+      // gpt-5-nano is a reasoning model: reasoning tokens count against the completion
+      // budget. This is a ceiling, not a target — billing is by tokens actually used, so
+      // a high cap is free on normal requests and just prevents truncation. The real
+      // budget guard is DAILY_SPEND_LIMIT_USD. Actual output (formula + one-sentence
+      // explanation + ranges) is a few hundred tokens; the rest is headroom for reasoning.
+      reasoning: { effort: "low" },
+      max_completion_tokens: 8000,
     }),
   });
   if (!response.ok) await throwProviderError(response);
   const body = await response.json();
+  const finishReason = body?.choices?.[0]?.finish_reason;
   const content = body?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") return null;
-  try {
-    return validateModelResult(JSON.parse(content));
-  } catch {
-    return null;
+  if (typeof content !== "string" || !content.trim()) {
+    return { result: null, reason: finishReason === "length" ? "truncated" : "empty" };
   }
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { result: null, reason: finishReason === "length" ? "truncated" : "unparseable" };
+  }
+  const result = validateModelResult(parsed);
+  return { result, reason: result ? "ok" : "invalid" };
 }
 
 export async function onRequestPost({ request, env }) {
@@ -175,9 +187,16 @@ export async function onRequestPost({ request, env }) {
 
   try {
     if (!await checkDailySpend(env.OPENROUTER_API_KEY)) return jsonResponse({ error: "The AI spending limit has been reached for today." }, 429);
-    let result = await requestFormula(env.OPENROUTER_API_KEY, payload);
-    if (!result) result = await requestFormula(env.OPENROUTER_API_KEY, payload);
-    if (!result) return jsonResponse({ error: "The AI returned an unsafe or invalid result. Nothing was written to your table." }, 502);
+    let { result, reason } = await requestFormula(env.OPENROUTER_API_KEY, payload);
+    if (!result) ({ result, reason } = await requestFormula(env.OPENROUTER_API_KEY, payload));
+    if (!result) {
+      const diagnosticId = createDiagnosticId();
+      console.error("Model result rejected", { diagnosticId, reason });
+      const detail = reason === "truncated"
+        ? "The AI ran out of room before finishing. Please try again."
+        : "The AI returned an unsafe or invalid result. Nothing was written to your table.";
+      return jsonResponse({ error: `${detail} Diagnostic ID: ${diagnosticId}` }, 502);
+    }
     return jsonResponse(result);
   } catch (error) {
     return jsonResponse({ error: error.message || "The AI service is temporarily unavailable." }, 502);
